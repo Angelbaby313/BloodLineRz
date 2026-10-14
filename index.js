@@ -36,6 +36,7 @@ const layout = [
   { name: '📨 PRIVATE APPLICATIONS', private: true, channels: [] }
 ];
 const commands = [
+  new SlashCommandBuilder().setName('server-restarted').setDescription('Ping BloodLine and announce the server is ready to fly in.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('update-server').setDescription('Update the welcome and staff application panel.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('setup').setDescription('Create BloodLineRZ roles, categories, channels and panels.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('post-panels').setDescription('Post verification and application panels.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -98,6 +99,7 @@ async function postPanels(guild){
   for(const [kind,p] of Object.entries(panels)){const ch=channelByName(guild,p.channel,ChannelType.GuildText);if(!ch){posted.push(`Missing #${p.channel}`);continue;}const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`blr_apply_${kind}`).setLabel(p.button).setStyle(ButtonStyle.Danger));await ch.send({embeds:[panelEmbed(p)],components:[row]});posted.push(`#${p.channel}`);}
   await postTicketPanel(guild); posted.push('#open-a-ticket');
   await postStaffPanel(guild); posted.push('#staff-applications');
+  await postReportPanels(guild); await ensureRestartChannel(guild); posted.push('#player-reports', '#bug-reports', '#server-restarts');
   return posted;
 }
 async function runSetup(guild){
@@ -139,7 +141,7 @@ function supportRoles(guild) {
   return [...guild.roles.cache.values()].filter(r => names.has(r.name));
 }
 function ticketOwner(channel) {
-  return channel?.topic?.match(/^BloodLineRZ (?:support|staff) \| owner:(\d+)$/)?.[1];
+  return channel?.topic?.match(/^BloodLineRZ (?:support|staff|player-report|bug-report) \| owner:(\d+)$/)?.[1];
 }
 function ticketStaff(interaction) {
   return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) || supportRoles(interaction.guild).some(r => interaction.member.roles.cache.has(r.id));
@@ -147,7 +149,7 @@ function ticketStaff(interaction) {
 async function postTicketPanel(guild) {
   const channel = channelByName(guild, 'open-a-ticket', ChannelType.GuildText);
   if (!channel) throw new Error('Missing #open-a-ticket. Create that text channel first.');
-  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('blr_ticket_open').setLabel('Open a Ticket').setEmoji('🎫').setStyle(ButtonStyle.Danger));
+  const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('blr_ticket_open').setLabel('Open a Ticket').setEmoji('🎫').setStyle(ButtonStyle.Danger), reportButton('player'), reportButton('bug'));
   const payload = { embeds: [new EmbedBuilder().setColor(RED).setTitle('🎫 BloodLineRZ Support').setDescription('Need help with the city, a player report, a bug, or an appeal? Click below to open a private ticket with our staff.\n\nExplain the issue and include any relevant screenshots or clips. Please allow staff time to respond.').setFooter({text:'BLOODLINERZ • Support Center'})], components: [row] };
   const recent = await channel.messages.fetch({limit:100});
   const existing = recent.find(m => m.author.id === client.user.id && m.components.some(r => r.components.some(b => b.customId === 'blr_ticket_open')));
@@ -175,7 +177,7 @@ async function openSupportTicket(interaction, kind = 'support') {
     const roles = kind === 'staff' ? applicationReviewers(guild) : supportRoles(guild);
     const channel = await guild.channels.create({name:`${kind === 'staff' ? 'staff-app' : 'ticket'}-${slug(interaction.user.username).slice(0,20)}-${interaction.user.id.slice(-6)}`,type:ChannelType.GuildText,parent:category.id,topic:`BloodLineRZ ${kind} | owner:${interaction.user.id}`,permissionOverwrites:[{id:guild.id,deny:[PermissionFlagsBits.ViewChannel]},{id:interaction.user.id,allow:access},{id:client.user.id,allow:[...access,PermissionFlagsBits.ManageChannels]},...roles.map(r => ({id:r.id,allow:access}))],reason:'BloodLineRZ private support ticket'});
     try {
-      await channel.send({content:`<@${interaction.user.id}>${roles.map(r => ` <@&${r.id}>`).join('')}`,allowedMentions:{users:[interaction.user.id],roles:roles.map(r => r.id)},embeds:[new EmbedBuilder().setColor(RED).setTitle(kind === 'staff' ? '🛡️ Staff Application' : '🎫 Your support ticket is open').setDescription(kind === 'staff' ? 'Thanks for your interest in joining the BloodLineRZ staff! Answer the questions below in this ticket:\n\n**1.** What is your name, age, and in-city name?\n**2.** What time zone are you in, and when are you available?\n**3.** What Red Zone or Discord staff experience do you have?\n**4.** Why do you want to join our staff, and what can you contribute?\n**5.** How would you handle a player report involving your friend?\n\nManagement will review your answers here. Please allow time for a response.' : 'Please describe what you need help with. Include character names, dates, and screenshots or clips when relevant.\n\nYou or support staff can close this ticket using the button below.')],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('blr_ticket_close').setLabel('Close Ticket / Save Transcript').setStyle(ButtonStyle.Secondary))]});
+      await channel.send({content:`<@${interaction.user.id}>${roles.map(r => ` <@&${r.id}>`).join('')}`,allowedMentions:{users:[interaction.user.id],roles:roles.map(r => r.id)},embeds:[new EmbedBuilder().setColor(RED).setTitle(kind === 'staff' ? '🛡️ Staff Application' : kind === 'player-report' ? '🚨 Player Report' : kind === 'bug-report' ? '🐛 Bug Report' : '🎫 Your support ticket is open').setDescription(kind === 'staff' ? 'Thanks for your interest in joining the BloodLineRZ staff! Answer the questions below in this ticket:\n\n**1.** What is your name, age, and in-city name?\n**2.** What time zone are you in, and when are you available?\n**3.** What Red Zone or Discord staff experience do you have?\n**4.** Why do you want to join our staff, and what can you contribute?\n**5.** How would you handle a player report involving your friend?\n\nManagement will review your answers here. Please allow time for a response.' : kind === 'player-report' ? 'Please answer here:\n\n**1.** Your in-game name and ID\n**2.** Reported player’s name and ID (if known)\n**3.** Date and time of the incident\n**4.** What happened and which rule was broken?\n**5.** Attach screenshots or clips as evidence.\n\nStaff will review your report privately.' : kind === 'bug-report' ? 'Please answer here:\n\n**1.** What bug did you encounter?\n**2.** Where and when did it happen?\n**3.** Steps to reproduce it\n**4.** What did you expect, and what happened instead?\n**5.** Attach screenshots, clips, or error messages.\n\nDo not include passwords or tokens. Staff will review your report privately.' : 'Please describe what you need help with. Include character names, dates, and screenshots or clips when relevant.\n\nYou or support staff can close this ticket using the button below.')],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('blr_ticket_close').setLabel('Close Ticket / Save Transcript').setStyle(ButtonStyle.Secondary))]});
     } catch (error) { await channel.delete('Ticket opening message failed').catch(() => {}); throw error; }
     return await interaction.editReply(`Your private ticket is ready: ${channel}`);
   } finally { ticketLocks.delete(key); }
@@ -220,14 +222,17 @@ async function closeSupportTicket(interaction) {
 client.on('interactionCreate',async interaction=>{try{
  if (!interaction.guild) return;
  if(interaction.isChatInputCommand()){
-  if(interaction.commandName==='update-server'){if(!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))return await interaction.reply({content:'Only administrators can update the server.',ephemeral:true});await interaction.deferReply({ephemeral:true});await postWelcome(interaction.guild);const ch=await postStaffPanel(interaction.guild);return await interaction.editReply(`Welcome updated. Staff application panel ready in ${ch}.`);}
+  if(interaction.commandName==='server-restarted'){if(!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))return await interaction.reply({content:'Only administrators can announce a restart.',ephemeral:true});await interaction.deferReply({ephemeral:true});const ch=await announceRestart(interaction.guild);return await interaction.editReply(`Restart announcement sent in ${ch}.`);}
+  if(interaction.commandName==='update-server'){if(!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))return await interaction.reply({content:'Only administrators can update the server.',ephemeral:true});await interaction.deferReply({ephemeral:true});await postWelcome(interaction.guild);const ch=await postStaffPanel(interaction.guild);await postTicketPanel(interaction.guild);await postReportPanels(interaction.guild);await ensureRestartChannel(interaction.guild);return await interaction.editReply(`Welcome updated. Staff application panel ready in ${ch}. Player and bug report buttons updated; #server-restarts is ready. Use /server-restarted once FiveM is back up.`);}
   if(interaction.commandName==='ticket-panel'){if(!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))return await interaction.reply({content:'Only administrators can post the ticket panel.',ephemeral:true});await interaction.deferReply({ephemeral:true});const ch=await postTicketPanel(interaction.guild);return await interaction.editReply(`Support ticket panel ready in ${ch}.`);}
   if(interaction.commandName==='setup'){if(!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))return await interaction.reply({content:'Only administrators can run setup.',ephemeral:true});await interaction.deferReply({ephemeral:true});const r=await runSetup(interaction.guild);return await interaction.editReply(`**BloodLineRZ setup complete.**\n• Categories: ${r.categories}\n• Roles checked: ${r.roles}\n• Panels posted: ${r.panels.join(', ')}\n\nThe verified role is **${VERIFIED_ROLE_NAME}**. Review permissions and role order.`);}
   if(interaction.commandName==='post-panels'){if(!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))return await interaction.reply({content:'Only administrators can post panels.',ephemeral:true});await interaction.deferReply({ephemeral:true});return await interaction.editReply(`Panels posted: ${(await postPanels(interaction.guild)).join(', ')}`);}
   if(interaction.commandName==='server-status'){await interaction.deferReply({ephemeral:true});const s=await getFiveMStatus();if(!s.configured)return await interaction.editReply('FiveM status is not configured yet. Set `CFX_SERVER_CODE` in `.env` to the code from your `cfx.re/join/XXXXX` link, restart the bot, and try again.');const e=new EmbedBuilder().setColor(s.online?0x2A9D8F:RED).setTitle('🩸 BloodLineRZ FiveM Status').setDescription(s.online?`**Online**\nPlayers: **${s.clients}/${s.maxClients}**\n${s.endpoint?`Connect address: ${s.endpoint}`:''}`:'**Offline or unreachable**').setTimestamp();return await interaction.editReply({embeds:[e]});}
-  if(interaction.commandName==='bloodline-help')return await interaction.reply({ephemeral:true,content:'**BloodLineRZ Management Bot**\n`/update-server` — update welcome and create the staff application panel.\n`/setup` — create roles, channels, and panels.\n`/post-panels` — repost verification, application, and support panels.\n`/ticket-panel` — post or update the support ticket panel in #open-a-ticket.\nSupport tickets are private to their owner and support staff. Close Ticket saves a text transcript in #staff-logs before deleting the channel.\n`/server-status` — check the configured FiveM server.\n\nVerification assigns the **BloodLine** role and removes **👤 Unverified** when present. Staff can approve/reject applications or close them to save a transcript in #staff-logs.'});
+  if(interaction.commandName==='bloodline-help')return await interaction.reply({ephemeral:true,content:'**BloodLineRZ Management Bot**\n`/server-restarted` — ping BloodLine in #server-restarts after FiveM is back up.\n`/update-server` — update welcome, staff applications, and report buttons.\n`/setup` — create roles, channels, and panels.\n`/post-panels` — repost verification, application, and support panels.\n`/ticket-panel` — post or update the support ticket panel in #open-a-ticket.\nSupport tickets are private to their owner and support staff. Close Ticket saves a text transcript in #staff-logs before deleting the channel.\n`/server-status` — check the configured FiveM server.\n\nVerification assigns the **BloodLine** role and removes **👤 Unverified** when present. Staff can approve/reject applications or close them to save a transcript in #staff-logs.'});
  }
  if(interaction.isButton()){
+  if(interaction.customId==='blr_report_player') return await openSupportTicket(interaction, 'player-report');
+  if(interaction.customId==='blr_report_bug') return await openSupportTicket(interaction, 'bug-report');
   if(interaction.customId==='blr_staff_open') return await openSupportTicket(interaction, 'staff');
   if(interaction.customId==='blr_ticket_open') return await openSupportTicket(interaction);
   if(interaction.customId==='blr_ticket_close') return await closeSupportTicket(interaction);
@@ -279,5 +284,49 @@ client.on('guildMemberAdd', async member => {
     if (channel) await channel.send({content:`Welcome, <@${member.id}>!`,embeds:[welcomeEmbed(member.guild)],allowedMentions:{users:[member.id]}});
   } catch (error) { console.error('Welcome message failed:', error); }
 });
+
+
+function reportButton(kind) {
+  return new ButtonBuilder().setCustomId(kind === 'player' ? 'blr_report_player' : 'blr_report_bug').setLabel(kind === 'player' ? 'Player Report' : 'Bug Report').setEmoji(kind === 'player' ? '🚨' : '🐛').setStyle(ButtonStyle.Danger);
+}
+async function postReportPanels(guild) {
+  await guild.channels.fetch();
+  for (const kind of ['player', 'bug']) {
+    const name = kind === 'player' ? 'player-reports' : 'bug-reports';
+    let channel = channelByName(guild, name, ChannelType.GuildText);
+    if (!channel) {
+      const parent = channelByName(guild, '🛠️ SUPPORT CENTER', ChannelType.GuildCategory);
+      channel = await guild.channels.create({name, type:ChannelType.GuildText, ...(parent ? {parent:parent.id} : {}), permissionOverwrites:[{id:guild.id,type:OverwriteType.Role,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.ReadMessageHistory],deny:[PermissionFlagsBits.SendMessages]},{id:client.user.id,type:OverwriteType.Member,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.EmbedLinks]}]});
+    }
+    const button = reportButton(kind);
+    const payload = {embeds:[new EmbedBuilder().setColor(RED).setTitle(kind === 'player' ? '🚨 Report a Player' : '🐛 Report a Bug').setDescription('Click below to open a private report ticket. Share the details and any screenshots or clips inside. Only you and authorized staff can view the ticket.')],components:[new ActionRowBuilder().addComponents(button)]};
+    const recent = await channel.messages.fetch({limit:100});
+    const id = kind === 'player' ? 'blr_report_player' : 'blr_report_bug';
+    const existing = recent.find(m => m.author.id === client.user.id && m.components.some(r => r.components.some(b => b.customId === id)));
+    if (existing) await existing.edit(payload); else await channel.send(payload);
+  }
+}
+async function ensureRestartChannel(guild) {
+  await guild.channels.fetch();
+  let channel = channelByName(guild, 'server-restarts', ChannelType.GuildText);
+  if (!channel) channel = await guild.channels.create({name:'server-restarts',type:ChannelType.GuildText,permissionOverwrites:[{id:guild.id,type:OverwriteType.Role,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.ReadMessageHistory],deny:[PermissionFlagsBits.SendMessages]},{id:client.user.id,type:OverwriteType.Member,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.EmbedLinks]}]});
+  return channel;
+}
+const restartAnnouncements = new Map();
+async function announceRestart(guild) {
+  if (restartAnnouncements.has(guild.id)) throw new Error('A restart announcement is already sending or was sent within the last minute.');
+  restartAnnouncements.set(guild.id, true);
+  try {
+    await guild.roles.fetch();
+    const role = roleByName(guild, VERIFIED_ROLE_NAME);
+    if (!role) throw new Error('BloodLine role is missing.');
+    const channel = await ensureRestartChannel(guild);
+    const me = await guild.members.fetchMe();
+    if (!role.mentionable && !channel.permissionsFor(me)?.has(PermissionFlagsBits.MentionEveryone)) throw new Error('Bot needs Mention @everyone, @here, and All Roles in #server-restarts to notify BloodLine.');
+    await channel.send({content:`<@&${role.id}> 🩸🔥 **BLOODLINE RZ IS BACK UP!**\n\nRestart complete—fly in, get active, and show us who really got motion! ✈️💥`,allowedMentions:{parse:[],roles:[role.id]}});
+    setTimeout(() => restartAnnouncements.delete(guild.id), 60000);
+    return channel;
+  } catch (error) { restartAnnouncements.delete(guild.id); throw error; }
+}
 
 client.login(TOKEN);
