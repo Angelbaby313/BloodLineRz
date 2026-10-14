@@ -313,7 +313,7 @@ async function ensureRestartChannel(guild) {
   return channel;
 }
 const restartAnnouncements = new Map();
-async function announceRestart(guild) {
+async function announceRestart(guild, bootId) {
   if (restartAnnouncements.has(guild.id)) throw new Error('A restart announcement is already sending or was sent within the last minute.');
   restartAnnouncements.set(guild.id, true);
   try {
@@ -321,12 +321,65 @@ async function announceRestart(guild) {
     const role = roleByName(guild, VERIFIED_ROLE_NAME);
     if (!role) throw new Error('BloodLine role is missing.');
     const channel = await ensureRestartChannel(guild);
+    if (bootId) {
+      const recent = await channel.messages.fetch({limit:100});
+      if (recent.some(m => m.author.id === client.user.id && m.embeds.some(e => e.footer?.text === `BloodLine startup: ${bootId}`))) {restartAnnouncements.delete(guild.id);return channel;}
+    }
     const me = await guild.members.fetchMe();
     if (!role.mentionable && !channel.permissionsFor(me)?.has(PermissionFlagsBits.MentionEveryone)) throw new Error('Bot needs Mention @everyone, @here, and All Roles in #server-restarts to notify BloodLine.');
-    await channel.send({content:`<@&${role.id}> 🩸🔥 **BLOODLINE RZ IS BACK UP!**\n\nRestart complete—fly in, get active, and show us who really got motion! ✈️💥`,allowedMentions:{parse:[],roles:[role.id]}});
+    await channel.send({content:`<@&${role.id}> 🩸🔥 **BLOODLINE RZ IS BACK UP!**\n\nRestart complete—fly in, get active, and show us who really got motion! ✈️💥`,allowedMentions:{parse:[],roles:[role.id]},...(bootId ? {embeds:[new EmbedBuilder().setColor(RED).setDescription('The server has finished its configured startup checks.').setFooter({text:`BloodLine startup: ${bootId}`})]} : {})});
     setTimeout(() => restartAnnouncements.delete(guild.id), 60000);
     return channel;
   } catch (error) { restartAnnouncements.delete(guild.id); throw error; }
+}
+
+
+// Optional authenticated bridge for the server-only FiveM restart resource.
+function createRestartBridge({secret, guildId, getGuild, announce, ready}) {
+  const http = require('node:http');
+  const crypto = require('node:crypto');
+  const boots = new Map();
+  return http.createServer(async (req, res) => {
+    const respond = (status, text) => { if (!res.writableEnded) {res.writeHead(status, {'Content-Type':'text/plain'});res.end(text);} };
+    if (req.method === 'GET' && req.url === '/health') return respond(ready() ? 200 : 503, ready() ? 'ready' : 'starting');
+    if (req.method !== 'POST' || req.url !== '/fivem/server-ready') return respond(404, 'Not found');
+    const supplied = Buffer.from(req.headers.authorization || '');
+    const expected = Buffer.from(`Bearer ${secret}`);
+    if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return respond(401, 'Unauthorized');
+    if (!ready()) return respond(503, 'Bot is starting; retry later');
+    let body = ''; let bytes = 0;
+    req.setTimeout(10000, () => {respond(408, 'Request timeout');req.destroy();});
+    req.on('data', chunk => {bytes += chunk.length; if(bytes > 1024) {respond(413, 'Payload too large');req.destroy();} else body += chunk;});
+    req.on('error', () => {});
+    req.on('end', async () => {
+      if (res.writableEnded) return;
+      let bootId;
+      try {bootId = JSON.parse(body).bootId;} catch {return respond(400, 'Invalid JSON');}
+      if (typeof bootId !== 'string' || !/^\d{1,16}-\d{1,16}$/.test(bootId)) return respond(400, 'Invalid boot ID');
+      if (boots.get(bootId) === 'sent') return respond(200, 'Already announced');
+      if (boots.has(bootId)) return respond(503, 'Announcement in progress; retry later');
+      boots.set(bootId, 'pending');
+      try {
+        const guild = await getGuild(guildId);
+        await announce(guild, bootId);
+        boots.set(bootId, 'sent');
+        if (boots.size > 1000) boots.delete(boots.keys().next().value);
+        respond(200, 'Announced');
+      } catch (error) {boots.delete(bootId);console.error('Restart bridge announcement failed:', error.message);respond(503, 'Announcement failed; retry later');}
+    });
+  });
+}
+const restartSecret = process.env.RESTART_WEBHOOK_SECRET;
+if (restartSecret) {
+  if (restartSecret.length < 32 || !GUILD_ID) {console.error('Restart bridge disabled: set GUILD_ID and a RESTART_WEBHOOK_SECRET of at least 32 characters.');}
+  else {
+    const port = Number(process.env.PORT || 3000);
+    const bridge = createRestartBridge({secret:restartSecret,guildId:GUILD_ID,getGuild:id=>client.guilds.fetch(id),announce:announceRestart,ready:()=>client.isReady()});
+    bridge.requestTimeout = 15000;
+    bridge.headersTimeout = 10000;
+    bridge.on('error', error => console.error('Restart bridge listener failed:', error.message));
+    bridge.listen(port, '0.0.0.0', () => console.log(`Restart bridge listening on port ${port}`));
+  }
 }
 
 client.login(TOKEN);
