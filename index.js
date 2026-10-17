@@ -442,3 +442,4 @@ client.once('clientReady', () => {
 });
 
 client.login(TOKEN);
+// Trigger updated announcement deployment
