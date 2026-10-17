@@ -228,7 +228,7 @@ client.on('interactionCreate',async interaction=>{try{
   if(interaction.commandName==='setup'){if(!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))return await interaction.reply({content:'Only administrators can run setup.',ephemeral:true});await interaction.deferReply({ephemeral:true});const r=await runSetup(interaction.guild);return await interaction.editReply(`**BloodLineRZ setup complete.**\n• Categories: ${r.categories}\n• Roles checked: ${r.roles}\n• Panels posted: ${r.panels.join(', ')}\n\nThe verified role is **${VERIFIED_ROLE_NAME}**. Review permissions and role order.`);}
   if(interaction.commandName==='post-panels'){if(!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))return await interaction.reply({content:'Only administrators can post panels.',ephemeral:true});await interaction.deferReply({ephemeral:true});return await interaction.editReply(`Panels posted: ${(await postPanels(interaction.guild)).join(', ')}`);}
   if(interaction.commandName==='server-status'){await interaction.deferReply({ephemeral:true});const s=await getFiveMStatus();if(!s.configured)return await interaction.editReply('FiveM status is not configured yet. Set `CFX_SERVER_CODE` in `.env` to the code from your `cfx.re/join/XXXXX` link, restart the bot, and try again.');const e=new EmbedBuilder().setColor(s.online?0x2A9D8F:RED).setTitle('🩸 BloodLineRZ FiveM Status').setDescription(s.online?`**Online**\nPlayers: **${s.clients}/${s.maxClients}**\n${s.endpoint?`Connect address: ${s.endpoint}`:''}`:'**Offline or unreachable**').setTimestamp();return await interaction.editReply({embeds:[e]});}
-  if(interaction.commandName==='bloodline-help')return await interaction.reply({ephemeral:true,content:'**BloodLineRZ Management Bot**\n`/server-restarted` — ping BloodLine in #server-restarts after FiveM is back up.\n`/update-server` — update welcome, staff applications, and report buttons.\n`/setup` — create roles, channels, and panels.\n`/post-panels` — repost verification, application, and support panels.\n`/ticket-panel` — post or update the support ticket panel in #open-a-ticket.\nSupport tickets are private to their owner and support staff. Close Ticket saves a text transcript in #staff-logs before deleting the channel.\n`/server-status` — check the configured FiveM server.\n\nVerification assigns the **BloodLine** role and removes **👤 Unverified** when present. Staff can approve/reject applications or close them to save a transcript in #staff-logs.'});
+  if(interaction.commandName==='bloodline-help')return await interaction.reply({ephemeral:true,content:'**BloodLineRZ Management Bot**\n`/server-restarted` — manually ping BloodLine in #server-restarts after FiveM is back up.\nAutomatic fly-in posts tag BloodLine in #server-restarts at midnight, 4 AM, 8 AM, noon, 4 PM, and 8 PM Eastern. Scheduled posts do not check server status.\n`/update-server` — update welcome, staff applications, and report buttons.\n`/setup` — create roles, channels, and panels.\n`/post-panels` — repost verification, application, and support panels.\n`/ticket-panel` — post or update the support ticket panel in #open-a-ticket.\nSupport tickets are private to their owner and support staff. Close Ticket saves a text transcript in #staff-logs before deleting the channel.\n`/server-status` — check the configured FiveM server.\n\nVerification assigns the **BloodLine** role and removes **👤 Unverified** when present. Staff can approve/reject applications or close them to save a transcript in #staff-logs.'});
  }
  if(interaction.isButton()){
   if(interaction.customId==='blr_report_player') return await openSupportTicket(interaction, 'player-report');
@@ -381,5 +381,64 @@ if (restartSecret) {
     bridge.listen(port, '0.0.0.0', () => console.log(`Restart bridge listening on port ${port}`));
   }
 }
+
+
+// Scheduled fly-in announcements use Eastern local time, including daylight saving.
+const LIVE_HOURS = new Set([0, 4, 8, 12, 16, 20]);
+const liveClock = new Intl.DateTimeFormat('en-CA', {
+  timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit',
+  hour:'2-digit', minute:'2-digit', hourCycle:'h23'
+});
+function liveAnnouncementSlot(now = new Date()) {
+  const p = Object.fromEntries(liveClock.formatToParts(now).map(v => [v.type, v.value]));
+  // Retry for five minutes after the scheduled time; do not replay old slots on startup.
+  if (!LIVE_HOURS.has(Number(p.hour)) || Number(p.minute) >= 5) return null;
+  return `${p.year}-${p.month}-${p.day}:${p.hour}`;
+}
+const scheduledLiveSent = new Map();
+let scheduledLiveBusy = false;
+async function scheduledLiveTick(now = new Date()) {
+  const slot = liveAnnouncementSlot(now);
+  if (!slot || !client.isReady() || scheduledLiveBusy) return;
+  scheduledLiveBusy = true;
+  try {
+    const guilds = GUILD_ID ? [await client.guilds.fetch(GUILD_ID)] : [...client.guilds.cache.values()];
+    for (const guild of guilds) {
+      if (scheduledLiveSent.get(guild.id) === slot) continue;
+      try {
+        await guild.roles.fetch();
+        const role = roleByName(guild, VERIFIED_ROLE_NAME);
+        if (!role) throw new Error('BloodLine role is missing.');
+        const channel = await ensureRestartChannel(guild);
+        const marker = `BloodLine scheduled live: ${slot}`;
+        // Discord history survives bot restarts and redeploys, preventing repeat pings.
+        const recent = await channel.messages.fetch({limit:100});
+        if (recent.some(m => m.author.id === client.user.id && m.embeds.some(e => e.footer?.text === marker))) {
+          scheduledLiveSent.set(guild.id, slot);
+          continue;
+        }
+        const me = await guild.members.fetchMe();
+        if (!role.mentionable && !channel.permissionsFor(me)?.has(PermissionFlagsBits.MentionEveryone)) {
+          throw new Error('Bot needs Mention @everyone, @here, and All Roles in #server-restarts to notify BloodLine.');
+        }
+        const embed = new EmbedBuilder().setColor(RED).setTitle('🩸🔥 BLOODLINE RZ IS LIVE! 🔥🩸')
+          .setDescription('✈️ **Fly in, get active, and get your hustle on!**\n\n🔫 Show us who the real shooters are! Check out all the arenas—some offer rewards, so put in work and see what you can earn. 👀💰\n\n**Who really got motion? FLY IN NOW!** 💥')
+          .setFooter({text:marker});
+        const components = CFX_SERVER_CODE ? [new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setLabel('Fly In Now').setStyle(ButtonStyle.Link)
+            .setURL(`https://cfx.re/join/${encodeURIComponent(CFX_SERVER_CODE)}`)
+        )] : [];
+        await channel.send({content:`<@&${role.id}>`,embeds:[embed],components,allowedMentions:{parse:[],roles:[role.id]}});
+        scheduledLiveSent.set(guild.id, slot);
+        console.log(`Scheduled BloodLine fly-in announcement sent: ${slot} Eastern`);
+      } catch (error) {console.error('Scheduled BloodLine announcement failed; retrying:', error.message);}
+    }
+  } finally {scheduledLiveBusy = false;}
+}
+client.once('clientReady', () => {
+  console.log('BloodLine fly-in schedule enabled: midnight, 4 AM, 8 AM, noon, 4 PM, 8 PM America/New_York.');
+  scheduledLiveTick().catch(error => console.error('Scheduled announcement scan failed:', error.message));
+  setInterval(() => scheduledLiveTick().catch(error => console.error('Scheduled announcement scan failed:', error.message)), 15000);
+});
 
 client.login(TOKEN);
